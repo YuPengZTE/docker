@@ -2,10 +2,18 @@ package task
 
 import (
 	"fmt"
+	"io"
 	"sort"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"golang.org/x/net/context"
 
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/cli/command"
+	"github.com/docker/docker/cli/command/idresolver"
+	"github.com/docker/go-units"
 )
 
 const (
@@ -48,6 +56,25 @@ func (t tasksBySlot) Less(i, j int) bool {
 	return t[j].Meta.CreatedAt.Before(t[i].CreatedAt)
 }
 
+// Print task information in a table format.
+// Besides this, command `docker node ps <node>`
+// and `docker stack ps` will call this, too.
+func Print(ctx context.Context, dockerCli *command.DockerCli, tasks []swarm.Task, resolver *idresolver.IDResolver, noTrunc bool) error {
+	sort.Stable(tasksBySlot(tasks))
+
+	writer := tabwriter.NewWriter(dockerCli.Out(), 0, 4, 2, ' ', 0)
+
+	// Ignore flushing errors
+	defer writer.Flush()
+	fmt.Fprintln(writer, strings.Join([]string{"NAME", "IMAGE", "NODE", "DESIRED STATE", "CURRENT STATE", "ERROR", "PORTS"}, "\t"))
+
+	if err := print(ctx, writer, tasks, resolver, noTrunc); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // PrintQuiet shows task list in a quiet way.
 func PrintQuiet(dockerCli *command.DockerCli, tasks []swarm.Task) error {
 	sort.Stable(tasksBySlot(tasks))
@@ -58,5 +85,51 @@ func PrintQuiet(dockerCli *command.DockerCli, tasks []swarm.Task) error {
 		fmt.Fprintln(out, task.ID)
 	}
 
+	return nil
+}
+
+func print(ctx context.Context, out io.Writer, tasks []swarm.Task, resolver *idresolver.IDResolver, noTrunc bool) error {
+	prevService := ""
+	prevSlot := 0
+	for _, task := range tasks {
+		name, err := resolver.Resolve(ctx, task, task.ID)
+
+		nodeValue, err := resolver.Resolve(ctx, swarm.Node{}, task.NodeID)
+		if err != nil {
+			return err
+		}
+
+		// Indent the name if necessary
+		indentedName := name
+		// Since the new format of the task name is <ServiceName>.<Slot>.<taskID>, we should only compare
+		// <ServiceName> and <Slot> here.
+		if prevService == task.ServiceID && prevSlot == task.Slot {
+			indentedName = fmt.Sprintf(" \\_ %s", indentedName)
+		}
+		prevService = task.ServiceID
+		prevSlot = task.Slot
+
+		// Trim and quote the error message.
+		taskErr := task.Status.Err
+		if !noTrunc && len(taskErr) > maxErrLength {
+			taskErr = fmt.Sprintf("%s…", taskErr[:maxErrLength-1])
+		}
+		if len(taskErr) > 0 {
+			taskErr = fmt.Sprintf("\"%s\"", taskErr)
+		}
+
+		fmt.Fprintf(
+			out,
+			psTaskItemFmt,
+			indentedName,
+			task.Spec.ContainerSpec.Image,
+			nodeValue,
+			command.PrettyPrint(task.DesiredState),
+			command.PrettyPrint(task.Status.State),
+			strings.ToLower(units.HumanDuration(time.Since(task.Status.Timestamp))),
+			taskErr,
+			portStatus(task.Status.PortStatus),
+		)
+	}
 	return nil
 }
