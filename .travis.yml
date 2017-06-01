@@ -1,0 +1,22 @@
+language: go
+sudo: true
+
+go:
+  - tip
+
+before_install:
+  - apt-get install docker
+  - go get -t -v ./...
+  
+  # install golint
+  - go get -u github.com/golang/lint/golint
+
+script:
+  - chmod 777 *
+  - ./go.test.sh
+  
+  # run golint on all golang files
+  - golint ./...
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash) -t 8643d471-8267-4048-b23c-fc97e1327356
